@@ -1,0 +1,21 @@
+# Binaries / build artifacts
+*.exe
+*.test
+*.out
+/example/example
+
+# Native libraries (use system GLFW)
+*.dylib
+*.so
+*.so.*
+*.dll
+*.a
+*.lib
+
+# OS / editor
+.DS_Store
+.cursor/
+.idea/
+.vscode/
+*.swp
+*~
