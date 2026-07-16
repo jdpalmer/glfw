@@ -807,9 +807,16 @@ func WindowHintString(hint Hint, value string) {
 
 // CreateWindow creates a window and OpenGL/Vulkan-capable context (per hints).
 // The returned *Window is a Go wrapper registered for callbacks; call Destroy when done.
+// Pass nil monitor for windowed mode and nil share for no context sharing.
 func CreateWindow(width, height int32, title string, monitor *Monitor, share *Window) *Window {
-	ptr := glfwCreateWindow(width, height, title, monitor.ptr, share.ptr)
-	return wrapWindow(ptr)
+	var mptr, sptr unsafe.Pointer
+	if monitor != nil {
+		mptr = monitor.ptr
+	}
+	if share != nil {
+		sptr = share.ptr
+	}
+	return wrapWindow(glfwCreateWindow(width, height, title, mptr, sptr))
 }
 
 // PollEvents processes pending events without blocking.
@@ -1154,8 +1161,13 @@ func (w *Window) Monitor() *Monitor {
 }
 
 // SetMonitor sets the monitor and video mode for fullscreen or windowed mode.
+// Pass nil monitor to switch back to windowed mode.
 func (w *Window) SetMonitor(monitor *Monitor, xpos, ypos, width, height, refreshRate int32) {
-	glfwSetWindowMonitor(w.ptr, monitor.ptr, xpos, ypos, width, height, refreshRate)
+	var mptr unsafe.Pointer
+	if monitor != nil {
+		mptr = monitor.ptr
+	}
+	glfwSetWindowMonitor(w.ptr, mptr, xpos, ypos, width, height, refreshRate)
 }
 
 // GetAttrib returns the value of a window attribute.
@@ -1317,8 +1329,13 @@ func (w *Window) SetCursorPos(x, y float64) {
 }
 
 // SetCursor sets the cursor image used when the cursor is over the content area.
+// Pass nil to restore the default arrow cursor.
 func (w *Window) SetCursor(cursor *Cursor) {
-	glfwSetCursor(w.ptr, cursor.ptr)
+	var cptr unsafe.Pointer
+	if cursor != nil {
+		cptr = cursor.ptr
+	}
+	glfwSetCursor(w.ptr, cptr)
 }
 
 // SetKeyCallback sets the key callback and returns the previous one.
