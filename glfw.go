@@ -17,6 +17,15 @@
 // Callbacks use one stable C trampoline per callback kind. Set*Callback
 // replaces the Go func and returns the previous one. Destroy and Terminate
 // clear retained callbacks and handle maps.
+//
+// # Shared libraries and EGL (macOS)
+//
+// Init loads libglfw from system paths, Homebrew locations, the executable
+// directory, or Contents/Frameworks. For EGL/OpenGL ES contexts, GLFW itself
+// loads libEGL and libGLESv2 by leaf name. On macOS that requires packaging
+// those dylibs where dyld can see them (typically Contents/Frameworks with an
+// LC_RPATH of @executable_path/../Frameworks on the main binary). A Homebrew
+// libglfw alone is not a viable way to ship EGL/ANGLE; see the README.
 package glfw
 
 import (
@@ -24,7 +33,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"sync"
 	"unsafe"
 
@@ -814,9 +822,15 @@ var libopengles uintptr
 // WindowHint sets a window creation hint. hint is a Hint name; value is
 // typically True/False, an API enumerant (OpenGLAPI, OpenGLCoreProfile, …),
 // DontCare, or a size.
+//
+// When hint is ContextCreationAPI/EGLContextAPI or ClientAPI/OpenGLESAPI,
+// this also tries to Dlopen EGL or GLESv2 from the same search paths as Init
+// (system, Homebrew, Frameworks, sibling). On Windows that often helps GLFW's
+// later LoadLibrary by basename. On macOS, GLFW still loads those libs by leaf
+// name using dyld search rules; preload alone is not enough — see the README
+// packaging notes.
 func WindowHint(hint Hint, value int32) {
 	if hint == ContextCreationAPI && value == EGLContextAPI {
-		// Preload EGL so GLFW can resolve it from non-system paths.
 		var names []string
 		switch runtime.GOOS {
 		case "darwin":
@@ -831,7 +845,6 @@ func WindowHint(hint Hint, value int32) {
 		}
 	}
 	if hint == ClientAPI && value == OpenGLESAPI {
-		// Preload GLESv2 so GLFW can resolve it from non-system paths.
 		var names []string
 		switch runtime.GOOS {
 		case "darwin":
@@ -2002,7 +2015,6 @@ func loadLibrary(names []string) (uintptr, error) {
 			dir := filepath.Dir(execPath)
 			searchPaths = append(searchPaths, filepath.Join(dir, "..", "Frameworks"), dir)
 		}
-		searchPaths = append(searchPaths, chromiumLibraryDirs()...)
 	case "linux":
 		searchPaths = []string{""}
 		if execPath, err := os.Executable(); err == nil {
@@ -2013,7 +2025,6 @@ func loadLibrary(names []string) (uintptr, error) {
 		if execPath, err := os.Executable(); err == nil {
 			searchPaths = append(searchPaths, filepath.Dir(execPath))
 		}
-		searchPaths = append(searchPaths, chromiumLibraryDirs()...)
 	default:
 		return 0, fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
@@ -2022,7 +2033,11 @@ func loadLibrary(names []string) (uintptr, error) {
 		for _, name := range names {
 			fullPath := name
 			if path != "" {
-				fullPath = filepath.Join(path, name)
+				if path == "@rpath" {
+					fullPath = path + "/" + name
+				} else {
+					fullPath = filepath.Join(path, name)
+				}
 			}
 			if handle, err := purego.Dlopen(fullPath, purego.RTLD_NOW|purego.RTLD_GLOBAL); err == nil {
 				return handle, nil
@@ -2031,71 +2046,4 @@ func loadLibrary(names []string) (uintptr, error) {
 	}
 
 	return 0, fmt.Errorf("failed to load library %v on %s: all paths exhausted", names, runtime.GOOS)
-}
-
-// chromiumLibraryDirs returns browser install dirs that contain ANGLE's
-// EGL/GLESv2 libs. Last-resort only (no official ANGLE binaries); prefer
-// bundling your own.
-func chromiumLibraryDirs() []string {
-	var roots []string
-	switch runtime.GOOS {
-	case "darwin":
-		for _, app := range []string{
-			"Google Chrome.app",
-			"Chromium.app",
-			"Google Chrome Canary.app",
-			"Microsoft Edge.app",
-			"Microsoft Edge Beta.app",
-			"Microsoft Edge Canary.app",
-		} {
-			matches, _ := filepath.Glob(filepath.Join("/Applications", app,
-				"Contents/Frameworks/*.framework/Versions/*/Libraries"))
-			roots = append(roots, matches...)
-		}
-	case "windows":
-		for _, base := range []string{
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Google", "Chrome", "Application"),
-			filepath.Join(os.Getenv("ProgramFiles"), "Google", "Chrome", "Application"),
-			filepath.Join(os.Getenv("ProgramFiles(x86)"), "Google", "Chrome", "Application"),
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Chromium", "Application"),
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Google", "Chrome SxS", "Application"),
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "Edge", "Application"),
-			filepath.Join(os.Getenv("ProgramFiles"), "Microsoft", "Edge", "Application"),
-			filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "Edge", "Application"),
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "Edge Beta", "Application"),
-			filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "Edge SxS", "Application"),
-		} {
-			entries, err := os.ReadDir(base)
-			if err != nil {
-				continue
-			}
-			for _, e := range entries {
-				if e.IsDir() {
-					roots = append(roots, filepath.Join(base, e.Name()))
-				}
-			}
-		}
-	default:
-		return nil
-	}
-
-	egl, gles := "libEGL.dylib", "libGLESv2.dylib"
-	if runtime.GOOS == "windows" {
-		egl, gles = "libEGL.dll", "libGLESv2.dll"
-	}
-
-	var out []string
-	for _, dir := range roots {
-		if _, err := os.Stat(filepath.Join(dir, egl)); err != nil {
-			continue
-		}
-		if _, err := os.Stat(filepath.Join(dir, gles)); err != nil {
-			continue
-		}
-		out = append(out, dir)
-	}
-
-	// Prefer newer browser versions over older. Not perfect.
-	sort.Sort(sort.Reverse(sort.StringSlice(out)))
-	return out
 }
