@@ -2,19 +2,21 @@
 //
 // # Threading
 //
-// Most GLFW calls must run on the main thread. Init locks the calling OS thread
-// via runtime.LockOSThread; keep event polling and window creation on that thread.
+// Most GLFW calls must run on the main thread. Init locks the calling OS
+// thread via runtime.LockOSThread; keep event polling and window creation on
+// that thread.
 //
 // # Handles and GC
 //
 // Window, Monitor, and Cursor are Go-owned wrappers around opaque C handles.
-// Callbacks receive the same Go *Window / *Monitor values registered at create
-// time. User data from SetUserPointer is stored on the Go wrapper as any; it is
-// not written into GLFW's C user-pointer slot, so the GC can track it safely.
+// Callbacks receive the same Go *Window / *Monitor values registered at
+// create time. User data from SetUserPointer is stored on the Go wrapper as
+// any; it is not written into GLFW's C user-pointer slot, so the GC can track
+// it safely.
 //
-// Callbacks use one stable C trampoline per callback kind. Set*Callback replaces
-// the Go func and returns the previous one. Destroy and Terminate clear retained
-// callbacks and handle maps.
+// Callbacks use one stable C trampoline per callback kind. Set*Callback
+// replaces the Go func and returns the previous one. Destroy and Terminate
+// clear retained callbacks and handle maps.
 package glfw
 
 import (
@@ -22,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"sync"
 	"unsafe"
 
@@ -65,7 +68,7 @@ type Key int32
 const (
 	KeyUnknown Key = -1
 
-	/* Printable keys */
+	// Printable keys
 	KeySpace        Key = 32
 	KeyApostrophe   Key = 39 // '
 	KeyComma        Key = 44 // ,
@@ -117,7 +120,7 @@ const (
 	KeyWorld_1      Key = 161 // non-US #1
 	KeyWorld_2      Key = 162 // non-US #2
 
-	/* Function keys */
+	// Function keys
 	KeyEscape        Key = 256
 	KeyEnter         Key = 257
 	KeyTab           Key = 258
@@ -568,14 +571,20 @@ type Cursor struct {
 	ptr unsafe.Pointer
 }
 
-// Init loads the platform GLFW shared library, registers trampolines, locks the
-// OS thread, and initializes GLFW. Call Terminate before exit.
+// Init loads the platform GLFW shared library, registers trampolines, locks
+// the OS thread, and initializes GLFW. Call Terminate before exit.
 func Init() error {
-	//var lib uintptr
-	//var err error
+	var names []string
+	switch runtime.GOOS {
+	case "darwin":
+		names = []string{"libglfw.3.dylib", "libglfw.dylib"}
+	case "linux":
+		names = []string{"libglfw.so.3", "libglfw.so"}
+	case "windows":
+		names = []string{"glfw3.dll"}
+	}
 
-	lib, err := loadGLFW()
-
+	lib, err := loadLibrary(names)
 	if err != nil {
 		return err
 	}
@@ -703,7 +712,8 @@ func Init() error {
 	return nil
 }
 
-// Terminate shuts down GLFW and clears handle maps, user data, and global callbacks.
+// Terminate shuts down GLFW and clears handle maps, user data, and global
+// callbacks.
 func Terminate() {
 	glfwTerminate()
 	windowMap = sync.Map{}
@@ -715,8 +725,9 @@ func Terminate() {
 	joystickCallback = nil
 }
 
-// SetErrorCallback sets the global error callback and returns the previous one.
-// Pass nil to remove. The callback may be invoked on any thread GLFW uses.
+// SetErrorCallback sets the global error callback and returns the previous
+// one. Pass nil to remove. The callback may be invoked on any thread GLFW
+// uses.
 func SetErrorCallback(cb ErrorFunc) ErrorFunc {
 	prev := errorCallback
 	errorCallback = cb
@@ -728,7 +739,8 @@ func SetErrorCallback(cb ErrorFunc) ErrorFunc {
 	return prev
 }
 
-// GetVersion returns the compile-time major, minor, and revision of the GLFW library.
+// GetVersion returns the compile-time major, minor, and revision of the GLFW
+// library.
 func GetVersion() (major, minor, rev int32) {
 	var m, mn, r int32
 	glfwGetVersion(&m, &mn, &r)
@@ -752,7 +764,8 @@ func GetPlatform() PlatformID {
 	return PlatformID(glfwGetPlatform())
 }
 
-// PlatformSupported reports whether the specified platform is supported on this machine.
+// PlatformSupported reports whether the specified platform is supported on
+// this machine.
 func PlatformSupported(platform PlatformID) bool {
 	return glfwPlatformSupported(int32(platform)) != 0
 }
@@ -777,7 +790,8 @@ func GetPrimaryMonitor() *Monitor {
 	return wrapMonitor(glfwGetPrimaryMonitor())
 }
 
-// SetMonitorCallback sets the global monitor connection callback and returns the previous one.
+// SetMonitorCallback sets the global monitor connection callback and returns
+// the previous one.
 func SetMonitorCallback(cb MonitorFunc) MonitorFunc {
 	prev := monitorCallback
 	monitorCallback = cb
@@ -794,20 +808,55 @@ func DefaultWindowHints() {
 	glfwDefaultWindowHints()
 }
 
-// WindowHint sets a window creation hint. hint is a Hint name; value is typically
-// True/False, an API enumerant (OpenGLAPI, OpenGLCoreProfile, …), DontCare, or a size.
+var libegl uintptr
+var libopengles uintptr
+
+// WindowHint sets a window creation hint. hint is a Hint name; value is
+// typically True/False, an API enumerant (OpenGLAPI, OpenGLCoreProfile, …),
+// DontCare, or a size.
 func WindowHint(hint Hint, value int32) {
+	if hint == ContextCreationAPI && value == EGLContextAPI {
+		// Preload EGL so GLFW can resolve it from non-system paths.
+		var names []string
+		switch runtime.GOOS {
+		case "darwin":
+			names = []string{"libEGL.dylib"}
+		case "linux":
+			names = []string{"libEGL.so.1", "libEGL.so"}
+		case "windows":
+			names = []string{"libEGL.dll", "EGL.dll"}
+		}
+		if h, err := loadLibrary(names); err == nil {
+			libegl = h
+		}
+	}
+	if hint == ClientAPI && value == OpenGLESAPI {
+		// Preload GLESv2 so GLFW can resolve it from non-system paths.
+		var names []string
+		switch runtime.GOOS {
+		case "darwin":
+			names = []string{"libGLESv2.dylib"}
+		case "linux":
+			names = []string{"libGLESv2.so.2", "libGLESv2.so"}
+		case "windows":
+			names = []string{"libGLESv2.dll"}
+		}
+		if h, err := loadLibrary(names); err == nil {
+			libopengles = h
+		}
+	}
 	glfwWindowHint(int32(hint), value)
 }
 
-// WindowHintString sets a string-valued window hint (for example CocoaFrameName).
+// WindowHintString sets a string-valued window hint.
 func WindowHintString(hint Hint, value string) {
 	glfwWindowHintString(int32(hint), value)
 }
 
 // CreateWindow creates a window and OpenGL/Vulkan-capable context (per hints).
-// The returned *Window is a Go wrapper registered for callbacks; call Destroy when done.
-// Pass nil monitor for windowed mode and nil share for no context sharing.
+// The returned *Window is a Go wrapper registered for callbacks; call Destroy
+// when done. Pass nil monitor for windowed mode and nil share for no context
+// sharing.
 func CreateWindow(width, height int32, title string, monitor *Monitor, share *Window) *Window {
 	var mptr, sptr unsafe.Pointer
 	if monitor != nil {
@@ -902,7 +951,7 @@ func JoystickGUID(jid Joystick) string {
 	return glfwGetJoystickGUID(int32(jid))
 }
 
-// SetJoystickUserPointer stores an arbitrary Go value for a joystick (Go-side only).
+// SetJoystickUserPointer stores an arbitrary Go value for a joystick.
 func SetJoystickUserPointer(jid Joystick, ptr any) {
 	if ptr == nil {
 		joyUserMap.Delete(jid)
@@ -911,7 +960,8 @@ func SetJoystickUserPointer(jid Joystick, ptr any) {
 	joyUserMap.Store(jid, ptr)
 }
 
-// JoystickUserPointer returns the value previously passed to SetJoystickUserPointer.
+// JoystickUserPointer returns the value previously passed to
+// SetJoystickUserPointer.
 func JoystickUserPointer(jid Joystick) any {
 	if v, ok := joyUserMap.Load(jid); ok {
 		return v
@@ -922,7 +972,8 @@ func JoystickUserPointer(jid Joystick) any {
 // JoystickIsGamepad reports whether the joystick has a gamepad mapping.
 func JoystickIsGamepad(jid Joystick) bool { return glfwJoystickIsGamepad(int32(jid)) != 0 }
 
-// SetJoystickCallback sets the global joystick connection callback and returns the previous one.
+// SetJoystickCallback sets the global joystick connection callback and
+// returns the previous one.
 func SetJoystickCallback(cb JoystickFunc) JoystickFunc {
 	prev := joystickCallback
 	joystickCallback = cb
@@ -983,8 +1034,8 @@ func ExtensionSupported(extension string) bool {
 	return glfwExtensionSupported(extension) != 0
 }
 
-// GetProcAddress returns a raw OpenGL/OpenGL ES function pointer
-// (not a Go func value). Pass it directly to your GL loader.
+// GetProcAddress returns a raw OpenGL/OpenGL ES function pointer (not a Go
+// func value). Pass it directly to your GL loader.
 func GetProcAddress(procname string) unsafe.Pointer {
 	addr := glfwGetProcAddress(procname)
 	return *(*unsafe.Pointer)(unsafe.Pointer(&addr))
@@ -995,7 +1046,8 @@ func VulkanSupported() bool {
 	return glfwVulkanSupported() != 0
 }
 
-// GetRequiredInstanceExtensions returns the Vulkan instance extensions required by GLFW.
+// GetRequiredInstanceExtensions returns the Vulkan instance extensions
+// required by GLFW.
 func GetRequiredInstanceExtensions() []string {
 	var count uint32
 	ptr := glfwGetRequiredInstanceExtensions(&count)
@@ -1189,8 +1241,9 @@ func (w *Window) SetUserPointer(ptr any) { w.user = ptr }
 // UserPointer returns the value previously passed to SetUserPointer.
 func (w *Window) UserPointer() any { return w.user }
 
-// SetPosCallback sets the window position callback and returns the previous one.
-// Pass nil to remove. All Set*Callback methods on Window share this replace semantics.
+// SetPosCallback sets the window position callback and returns the previous
+// one. Pass nil to remove. All Set*Callback methods on Window share this
+// replace semantics.
 func (w *Window) SetPosCallback(cb WindowPosFunc) WindowPosFunc {
 	prev := w.posCb
 	w.posCb = cb
@@ -1274,7 +1327,8 @@ func (w *Window) SetMaximizeCallback(cb WindowMaximizeFunc) WindowMaximizeFunc {
 	return prev
 }
 
-// SetFramebufferSizeCallback sets the framebuffer size callback and returns the previous one.
+// SetFramebufferSizeCallback sets the framebuffer size callback and returns
+// the previous one.
 func (w *Window) SetFramebufferSizeCallback(cb FramebufferSizeFunc) FramebufferSizeFunc {
 	prev := w.framebufferSizeCb
 	w.framebufferSizeCb = cb
@@ -1286,7 +1340,8 @@ func (w *Window) SetFramebufferSizeCallback(cb FramebufferSizeFunc) FramebufferS
 	return prev
 }
 
-// SetContentScaleCallback sets the content scale callback and returns the previous one.
+// SetContentScaleCallback sets the content scale callback and returns the
+// previous one.
 func (w *Window) SetContentScaleCallback(cb WindowContentScaleFunc) WindowContentScaleFunc {
 	prev := w.contentScaleCb
 	w.contentScaleCb = cb
@@ -1329,8 +1384,8 @@ func (w *Window) SetCursorPos(x, y float64) {
 	glfwSetCursorPos(w.ptr, x, y)
 }
 
-// SetCursor sets the cursor image used when the cursor is over the content area.
-// Pass nil to restore the default arrow cursor.
+// SetCursor sets the cursor image used when the cursor is over the content
+// area. Pass nil to restore the default arrow cursor.
 func (w *Window) SetCursor(cursor *Cursor) {
 	var cptr unsafe.Pointer
 	if cursor != nil {
@@ -1351,7 +1406,8 @@ func (w *Window) SetKeyCallback(cb KeyFunc) KeyFunc {
 	return prev
 }
 
-// SetCharCallback sets the Unicode character callback and returns the previous one.
+// SetCharCallback sets the Unicode character callback and returns the
+// previous one.
 func (w *Window) SetCharCallback(cb CharFunc) CharFunc {
 	prev := w.charCb
 	w.charCb = cb
@@ -1363,7 +1419,8 @@ func (w *Window) SetCharCallback(cb CharFunc) CharFunc {
 	return prev
 }
 
-// SetCharModsCallback sets the character-with-modifiers callback and returns the previous one.
+// SetCharModsCallback sets the character-with-modifiers callback and returns
+// the previous one.
 func (w *Window) SetCharModsCallback(cb CharModsFunc) CharModsFunc {
 	prev := w.charModsCb
 	w.charModsCb = cb
@@ -1375,7 +1432,8 @@ func (w *Window) SetCharModsCallback(cb CharModsFunc) CharModsFunc {
 	return prev
 }
 
-// SetMouseButtonCallback sets the mouse button callback and returns the previous one.
+// SetMouseButtonCallback sets the mouse button callback and returns the
+// previous one.
 func (w *Window) SetMouseButtonCallback(cb MouseButtonFunc) MouseButtonFunc {
 	prev := w.mouseButtonCb
 	w.mouseButtonCb = cb
@@ -1387,7 +1445,8 @@ func (w *Window) SetMouseButtonCallback(cb MouseButtonFunc) MouseButtonFunc {
 	return prev
 }
 
-// SetCursorPosCallback sets the cursor position callback and returns the previous one.
+// SetCursorPosCallback sets the cursor position callback and returns the
+// previous one.
 func (w *Window) SetCursorPosCallback(cb CursorPosFunc) CursorPosFunc {
 	prev := w.cursorPosCb
 	w.cursorPosCb = cb
@@ -1399,7 +1458,8 @@ func (w *Window) SetCursorPosCallback(cb CursorPosFunc) CursorPosFunc {
 	return prev
 }
 
-// SetCursorEnterCallback sets the cursor enter/leave callback and returns the previous one.
+// SetCursorEnterCallback sets the cursor enter/leave callback and returns the
+// previous one.
 func (w *Window) SetCursorEnterCallback(cb CursorEnterFunc) CursorEnterFunc {
 	prev := w.cursorEnterCb
 	w.cursorEnterCb = cb
@@ -1687,7 +1747,7 @@ var (
 	monitorCallback  MonitorFunc
 	joystickCallback JoystickFunc
 
-	// Stable C-callable trampolines (one NewCallback each, created in Init).
+	// Stable C-callable trampolines.
 	trampWindowPos          uintptr
 	trampWindowSize         uintptr
 	trampWindowClose        uintptr
@@ -1927,51 +1987,115 @@ func installTrampolines() {
 	})
 }
 
-func loadGLFW() (uintptr, error) {
-	var names []string
+func loadLibrary(names []string) (uintptr, error) {
 	var searchPaths []string
 
-	// 1. Determine OS-specific file names
 	switch runtime.GOOS {
 	case "darwin":
-		names = []string{"libglfw.3.dylib", "libglfw.dylib"}
 		searchPaths = []string{
-			"", // "" forces a raw system check first (handles standard paths & global locations)
+			"", // leaf name / system locations
+			"@rpath",
 			"/opt/homebrew/lib",
 			"/usr/local/lib",
 		}
-		// Method 1: Add macOS App Bundle context if we can find the executable
 		if execPath, err := os.Executable(); err == nil {
-			searchPaths = append(searchPaths, filepath.Join(filepath.Dir(execPath), "..", "Frameworks"))
-			searchPaths = append(searchPaths, filepath.Dir(execPath)) // Sibling dir fallback
+			dir := filepath.Dir(execPath)
+			searchPaths = append(searchPaths, filepath.Join(dir, "..", "Frameworks"), dir)
 		}
+		searchPaths = append(searchPaths, chromiumLibraryDirs()...)
 	case "linux":
-		names = []string{"libglfw.so.3", "libglfw.so"}
-		searchPaths = []string{""} // System paths
+		searchPaths = []string{""}
 		if execPath, err := os.Executable(); err == nil {
-			searchPaths = append(searchPaths, filepath.Dir(execPath)) // Sibling dir fallback
+			searchPaths = append(searchPaths, filepath.Dir(execPath))
 		}
 	case "windows":
-		names = []string{"glfw3.dll"}
-		searchPaths = []string{""} // System paths & Executable directory auto-search
+		searchPaths = []string{""}
+		if execPath, err := os.Executable(); err == nil {
+			searchPaths = append(searchPaths, filepath.Dir(execPath))
+		}
+		searchPaths = append(searchPaths, chromiumLibraryDirs()...)
 	default:
 		return 0, fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
 
-	// 2. Single unified search loop
 	for _, path := range searchPaths {
 		for _, name := range names {
 			fullPath := name
 			if path != "" {
 				fullPath = filepath.Join(path, name)
 			}
-
-			// Attempt to open the resolved target path
 			if handle, err := purego.Dlopen(fullPath, purego.RTLD_NOW|purego.RTLD_GLOBAL); err == nil {
-				return handle, nil // Success!
+				return handle, nil
 			}
 		}
 	}
 
-	return 0, fmt.Errorf("failed to load GLFW on %s: all paths exhausted", runtime.GOOS)
+	return 0, fmt.Errorf("failed to load library %v on %s: all paths exhausted", names, runtime.GOOS)
+}
+
+// chromiumLibraryDirs returns browser install dirs that contain ANGLE's
+// EGL/GLESv2 libs. Last-resort only (no official ANGLE binaries); prefer
+// bundling your own.
+func chromiumLibraryDirs() []string {
+	var roots []string
+	switch runtime.GOOS {
+	case "darwin":
+		for _, app := range []string{
+			"Google Chrome.app",
+			"Chromium.app",
+			"Google Chrome Canary.app",
+			"Microsoft Edge.app",
+			"Microsoft Edge Beta.app",
+			"Microsoft Edge Canary.app",
+		} {
+			matches, _ := filepath.Glob(filepath.Join("/Applications", app,
+				"Contents/Frameworks/*.framework/Versions/*/Libraries"))
+			roots = append(roots, matches...)
+		}
+	case "windows":
+		for _, base := range []string{
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Google", "Chrome", "Application"),
+			filepath.Join(os.Getenv("ProgramFiles"), "Google", "Chrome", "Application"),
+			filepath.Join(os.Getenv("ProgramFiles(x86)"), "Google", "Chrome", "Application"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Chromium", "Application"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Google", "Chrome SxS", "Application"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "Edge", "Application"),
+			filepath.Join(os.Getenv("ProgramFiles"), "Microsoft", "Edge", "Application"),
+			filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft", "Edge", "Application"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "Edge Beta", "Application"),
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Microsoft", "Edge SxS", "Application"),
+		} {
+			entries, err := os.ReadDir(base)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() {
+					roots = append(roots, filepath.Join(base, e.Name()))
+				}
+			}
+		}
+	default:
+		return nil
+	}
+
+	egl, gles := "libEGL.dylib", "libGLESv2.dylib"
+	if runtime.GOOS == "windows" {
+		egl, gles = "libEGL.dll", "libGLESv2.dll"
+	}
+
+	var out []string
+	for _, dir := range roots {
+		if _, err := os.Stat(filepath.Join(dir, egl)); err != nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, gles)); err != nil {
+			continue
+		}
+		out = append(out, dir)
+	}
+
+	// Prefer newer browser versions over older. Not perfect.
+	sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	return out
 }
