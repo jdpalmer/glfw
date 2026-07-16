@@ -983,10 +983,11 @@ func ExtensionSupported(extension string) bool {
 	return glfwExtensionSupported(extension) != 0
 }
 
-// GetProcAddress returns a raw OpenGL/OpenGL ES function pointer as uintptr
-// (not a Go func value). Cast or pass it to your GL loader as needed.
-func GetProcAddress(procname string) uintptr {
-	return glfwGetProcAddress(procname)
+// GetProcAddress returns a raw OpenGL/OpenGL ES function pointer
+// (not a Go func value). Pass it directly to your GL loader.
+func GetProcAddress(procname string) unsafe.Pointer {
+	addr := glfwGetProcAddress(procname)
+	return *(*unsafe.Pointer)(unsafe.Pointer(&addr))
 }
 
 // VulkanSupported reports whether the Vulkan loader and an ICD have been found.
